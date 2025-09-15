@@ -1,2 +1,6 @@
 Flask
 flasgger
+pyspark
+python-dateutil
+pandas
+fuzzywuzzy
