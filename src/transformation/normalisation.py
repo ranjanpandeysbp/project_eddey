@@ -7,32 +7,37 @@ from typing import List, Dict, Tuple, Optional, Union
 from pyspark.sql.functions import col, trim
 from difflib import SequenceMatcher
 
-spark = SparkSession.builder.appName("ProjectEddy").getOrCreate()
-class normalisation:
-    df = spark.read.format("delta").table("data/Accounting_Sample_Data_2.xlsx - Journal Entries.csv")
-    df.show(5)
+from pyspark.sql.functions import udf, col
+from pyspark.sql.types import DateType
+from dateutil.parser import parse, ParserError
 
-    #For date normalisation
-    def try_parse_date(self, date_str):
-        try:
-            parsed_date = parse(date_str, fuzzy=True)
-            return parsed_date
-        except (ParserError, ValueError):
-            return None
+# Standalone function (pure Python)
+def try_parse_date(date_str):
+    try:
+        parsed_date = parse(date_str, fuzzy=True)
+        return parsed_date
+    except (ParserError, ValueError):
+        return None
 
-    def format_date(self, df):
+class Normalisation:
+    def __init__(self, spark, file_path):
+        self.df = spark.read.option("header", "true").csv(file_path)
+
+    def format_date(self):
         date_cols = ["Period", "Effective Date", "Entry Date"]
-        parse_date_udf = udf(self.try_parse_date, DateType())
+        parse_date_udf = udf(try_parse_date, DateType())  # Use standalone function
         for col_name in date_cols:
-            df = df.withColumn(col_name, parse_date_udf(col(col_name)))
-        return df
-    def format_numeric_fields(self,df,
-            float_cols=None,
-            int_cols=None,
-            float_precision=2,
-            use_sep=True,
-            int_padding=0
-    ):
+            self.df = self.df.withColumn(col_name, parse_date_udf(col(col_name)))
+        return self.df
+
+
+    def format_numeric_fields(self,
+                              float_cols=None,
+                              int_cols=None,
+                              float_precision=2,
+                              use_sep=True,
+                              int_padding=0
+                              ):
         """
         Format numeric fields in a PySpark DataFrame consistently.
 
@@ -50,10 +55,10 @@ class normalisation:
 
         if float_cols:
             for col in float_cols:
-                if col in df.columns:
+                if col in self.df.columns:
                     if use_sep:
                         # Format with comma separator and specified precision
-                        df = df.withColumn(
+                        self.df = self.df.withColumn(
                             col,
                             F.when(
                                 F.col(col).isNull(),
@@ -64,7 +69,7 @@ class normalisation:
                         )
                     else:
                         # Format without comma separator
-                        df = df.withColumn(
+                        self.df = self.df.withColumn(
                             col,
                             F.when(
                                 F.col(col).isNull(),
@@ -76,10 +81,10 @@ class normalisation:
 
         if int_cols:
             for col in int_cols:
-                if col in df.columns:
+                if col in self.df.columns:
                     if int_padding > 0:
                         # Format with zero padding
-                        df = df.withColumn(
+                        self.df = self.df.withColumn(
                             col,
                             F.when(
                                 F.col(col).isNull(),
@@ -90,7 +95,7 @@ class normalisation:
                         )
                     else:
                         # Format without padding
-                        df = df.withColumn(
+                        self.df = self.df.withColumn(
                             col,
                             F.when(
                                 F.col(col).isNull(),
@@ -100,7 +105,7 @@ class normalisation:
                             )
                         )
 
-        return df
+        return self.df
 
     """
     # Example usage:
@@ -126,25 +131,25 @@ class normalisation:
     display(formatted_df)
     """
 
-    def handling_missing_values(self, df):
+    def handling_missing_values(self):
         """
         Handle missing values in the DataFrame according to defined business rules.
         """
 
         # --- Critical Fields ---
         # 1. Journal Entry Number (Must not be missing)
-        if "Journal Entry Number" in df.columns:
-            missing_je = df.filter(F.col("Journal Entry Number").isNull())
+        if "Journal Entry Number" in self.df.columns:
+            missing_je = self.df.filter(F.col("Journal Entry Number").isNull())
             if missing_je.count() > 0:
                 print("Missing Journal Entry Numbers detected — further investigation required.")
 
         # 2. Fiscal Year (Can be hardcoded if not present)
-        if "Fiscal Year" not in df.columns:
+        if "Fiscal Year" not in self.df.columns:
             print("Fiscal Year column missing — consider deriving from analysis period / filename / effective date.")
 
         # 3. Business Unit (Mandatory)
-        if "Business Unit" in df.columns:
-            missing_bu = df.filter(F.col("Business Unit").isNull())
+        if "Business Unit" in self.df.columns:
+            missing_bu = self.df.filter(F.col("Business Unit").isNull())
             if missing_bu.count() > 0:
                 print("Missing Business Unit values detected — further investigation required.")
 
@@ -152,15 +157,15 @@ class normalisation:
         # No special handling required
 
         # 5. GL Account Number (Must not be missing)
-        if "GL Account Number" in df.columns:
-            missing_gl = df.filter(F.col("GL Account Number").isNull())
+        if "GL Account Number" in self.df.columns:
+            missing_gl = self.df.filter(F.col("GL Account Number").isNull())
             if missing_gl.count() > 0:
                 print("Missing GL Account Numbers detected — further investigation required.")
 
         # --- Date Fields ---
         # 6. Period (Generate from Effective Date if missing)
-        if "Period" in df.columns and "Effective Date" in df.columns:
-            df = df.withColumn(
+        if "Period" in self.df.columns and "Effective Date" in self.df.columns:
+            self.df = self.df.withColumn(
                 "Period",
                 F.when(
                     F.col("Period").isNull() & F.col("Effective Date").isNotNull(),
@@ -169,34 +174,47 @@ class normalisation:
             )
 
         # 7. Effective Date (Must not be missing)
-        if "Effective Date" in df.columns:
-            missing_ed = df.filter(F.col("Effective Date").isNull())
+        if "Effective Date" in self.df.columns:
+            missing_ed = self.df.filter(F.col("Effective Date").isNull())
             if missing_ed.count() > 0:
                 print("Missing Effective Dates detected — investigation required. Consider dummy dates if justified.")
 
         # 8. Entry Date (Optional)
-        if "Entry Date" in df.columns:
-            df = df.withColumn("Entry Date", F.to_date(F.col("Entry Date")))
+        if "Entry Date" in self.df.columns:
+            self.df = self.df.withColumn("Entry Date", F.to_date(F.col("Entry Date")))
 
         # --- Amount & Currency ---
         # 9. Functional Amount (Set to 0 if null)
-        if "Functional Amount" in df.columns:
-            df = df.withColumn(
+        if "Functional Amount" in self.df.columns:
+            self.df = self.df.withColumn(
                 "Functional Amount",
-                F.when(F.col("Functional Amount").isNull(), F.lit(0)).otherwise(F.col("Functional Amount"))
+                F.when(
+                    F.col("Functional Amount").isNull(),
+                    F.lit(0.0)
+                ).otherwise(
+                    F.when(
+                        F.col("Functional Amount") == "",
+                        F.lit(0.0)
+                    ).otherwise(
+                        # Use try_cast to handle malformed values
+                        F.coalesce(
+                            F.expr("try_cast(`Functional Amount` as DOUBLE)"),
+                            F.lit(0.0)
+                        )
+                    )
+                )
             )
-
         # 10. Functional Currency Code (Single currency → fill, else check Business Unit)
-        if "Functional Currency Code" in df.columns:
-            unique_currencies = [row[0] for row in df.select("Functional Currency Code").distinct().collect() if
+        if "Functional Currency Code" in self.df.columns:
+            unique_currencies = [row[0] for row in self.df.select("Functional Currency Code").distinct().collect() if
                                  row[0] is not None]
             if len(unique_currencies) == 1:
-                df = df.withColumn("Functional Currency Code", F.lit(unique_currencies[0]))
+                self.df = self.df.withColumn("Functional Currency Code", F.lit(unique_currencies[0]))
             else:
-                if "Business Unit" in df.columns:
+                if "Business Unit" in self.df.columns:
                     window = F.when(F.col("Functional Currency Code").isNull(), F.lit("CHECK_BU_MAPPING")).otherwise(
                         F.col("Functional Currency Code"))
-                    df = df.withColumn("Functional Currency Code", window)
+                    self.df = self.df.withColumn("Functional Currency Code", window)
                     print("Multiple currencies detected — fill missing based on Business Unit mapping.")
 
         # --- Descriptions & Text Fields ---
@@ -204,22 +222,22 @@ class normalisation:
 
         # 12. User/Source (Fill with Unknown, flag for investigation)
         for col_name in ["Source", "Preparer ID"]:
-            if col_name in df.columns:
-                df = df.withColumn(
+            if col_name in self.df.columns:
+                self.df = self.df.withColumn(
                     col_name,
                     F.when(F.col(col_name).isNull(), F.lit("Unknown")).otherwise(F.col(col_name))
                 )
 
         # --- Check Remaining Missing Values ---
         print("\nMissing values after handling:")
-        for column in df.columns:
-            null_count = df.filter(F.col(column).isNull()).count()
+        for column in self.df.columns:
+            null_count = self.df.filter(F.col(column).isNull()).count()
             if null_count > 0:
                 print(f"{column}: {null_count}")
 
         # --- Balance Check ---
-        if "Journal Entry Number" in df.columns and "Functional Amount" in df.columns:
-            journal_totals = df.groupBy("Journal Entry Number") \
+        if "Journal Entry Number" in self.df.columns and "Functional Amount" in self.df.columns:
+            journal_totals = self.df.groupBy("Journal Entry Number") \
                 .agg(F.sum("Functional Amount").alias("total_amount"))
 
             imbalanced_entries = journal_totals.filter(F.col("total_amount") != 0)
@@ -227,9 +245,9 @@ class normalisation:
                 print("\nFound journal entries that do not balance:")
                 imbalanced_entries.show()
 
-        return df
+        return self.df
 
-    def skip_empty_rows(self, df, required_columns: List[str] = None,
+    def skip_empty_rows(self, required_columns: List[str] = None,
                         skip_mode: str = 'auto'):
         """
         Skip empty rows or flag them based on requirements.
@@ -242,33 +260,33 @@ class normalisation:
         Returns:
         - Processed DataFrame
         """
-        print(f"Original row count: {df.count()}")
+        print(f"Original row count: {self.df.count()}")
 
         if skip_mode == 'auto':
             # Skip rows where all columns are null or empty
             non_empty_condition = None
-            for column in df.columns:
+            for column in self.df.columns:
                 col_condition = (col(column).isNotNull()) & (trim(col(column)) != "")
                 if non_empty_condition is None:
                     non_empty_condition = col_condition
                 else:
                     non_empty_condition = non_empty_condition | col_condition
 
-            filtered_df = df.filter(non_empty_condition)
+            filtered_df = self.df.filter(non_empty_condition)
             print(f"Rows after removing empty: {filtered_df.count()}")
             return filtered_df
 
         elif skip_mode == 'flag':
             # Add flag column for empty rows
             empty_condition = None
-            for column in df.columns:
+            for column in self.df.columns:
                 col_condition = (col(column).isNull()) | (trim(col(column)) == "")
                 if empty_condition is None:
                     empty_condition = col_condition
                 else:
                     empty_condition = empty_condition & col_condition
 
-            flagged_df = df.withColumn("is_empty_row", empty_condition)
+            flagged_df = self.df.withColumn("is_empty_row", empty_condition)
             empty_count = flagged_df.filter(col("is_empty_row") == True).count()
             print(f"Empty rows flagged: {empty_count}")
             return flagged_df
@@ -277,7 +295,7 @@ class normalisation:
             # Skip rows where required columns are null/empty
             required_condition = None
             for column in required_columns:
-                if column in df.columns:
+                if column in self.df.columns:
                     col_condition = (col(column).isNotNull()) & (trim(col(column)) != "")
                     if required_condition is None:
                         required_condition = col_condition
@@ -285,17 +303,17 @@ class normalisation:
                         required_condition = required_condition & col_condition
 
             if required_condition is not None:
-                filtered_df = df.filter(required_condition)
+                filtered_df = self.df.filter(required_condition)
                 print(f"Rows after strict filtering: {filtered_df.count()}")
                 return filtered_df
 
-        return df
+        return self.df
 
     def similarity_score(self, a: str, b: str) -> float:
         """Calculate similarity between two strings using SequenceMatcher"""
         return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
-    def fuzzy_match_column(self, df, column_name: str, threshold: float = 0.7) -> Optional[str]:
+    def fuzzy_match_column(self, column_name: str, threshold: float = 0.7) -> Optional[str]:
         expected_columns = [
             "Fiscal Year", "Business Unit", "Journal Entry Number", "Period",
             "Effective Date", "Source", "GL Account Number", "GL Account Name",

@@ -1,8 +1,41 @@
 from flask import Flask, jsonify, request
 from flasgger import Swagger, swag_from
-
+from pyspark.sql import SparkSession
+from transformation.normalisation import Normalisation
 app = Flask(__name__)
 swagger = Swagger(app)
+spark = SparkSession.builder.appName("ProjectEddyAPI").getOrCreate()
+
+@app.route('/transformation/preview', methods=['POST'])
+def preview():
+    n = int(request.args.get("n", 5))
+    data = norm.df.limit(n).toPandas().to_dict(orient="records")
+    return jsonify(data)
+
+@app.route("/transformation/format_dates", methods=["POST"])
+def format_dates():
+    df = norm.format_date()
+    data = df.limit(5).toPandas().to_dict(orient="records")
+    return jsonify(data)
+
+@app.route("/transformation/handle_missing", methods=["POST"])
+def handle_missing():
+    df = norm.handling_missing_values()
+    data = df.limit(5).toPandas().to_dict(orient="records")
+    return jsonify(data)
+
+@app.route("/transformation/numeric_fields", methods=["POST"])
+def handle_numeric_fields():
+    df = norm.format_numeric_fields()
+    data = df.limit(5).toPandas().to_dict(orient="records")
+    return jsonify(data)
+
+@app.route("/transformation/empty_rows", methods=["POST"])
+def handle_empty_rows():
+    df = norm.skip_empty_rows()
+    data = df.limit(5).toPandas().to_dict(orient="records")
+    return jsonify(data)
+
 
 # Simulate a database with a dictionary
 items_db = {
@@ -10,10 +43,10 @@ items_db = {
     "banana": {"name": "banana", "description": "A long, yellow fruit."},
     "cherry": {"name": "cherry", "description": "A small, red fruit."}
 }
-
+norm = Normalisation(spark, "../data/Accounting_Sample_Data_Journal_Entries.csv")
 @app.route('/')
 def index():
-    return "Welcome to the CRUD API!"
+    return "Welcome to the Project Eddy!"
 
 # --- Read Operations ---
 
@@ -133,6 +166,10 @@ def create_item():
     new_item = {"name": name, "description": description}
     items_db[name] = new_item
     return jsonify({"message": "Item created successfully", "item": new_item}), 201
+
+
+
+
 
 # --- Update Operation ---
 
